@@ -8,7 +8,7 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.Trans.Resource (MonadResource, runResourceT)
 import Data.ByteString.Char8 as BS
-import Data.Conduit
+import Data.Conduit hiding (connect)
 import Data.Conduit.Binary as CB
 import Data.Conduit.List as CL
 import Data.Conduit.Network
@@ -16,11 +16,12 @@ import Data.IORef
 import Network.Sendfile
 import Network.Socket
 import System.Directory
+import System.EasyFile
 import System.Exit
 import System.IO
+import System.IO.Temp
 import System.Process
 import System.Timeout
-import System.EasyFile
 import Test.Hspec
 
 ----------------------------------------------------------------
@@ -120,8 +121,8 @@ sendFileCore range headers = bracket setup teardown $ \(s2,_) -> do
         off' = fromIntegral off
         len' = fromIntegral len
     setup = do
-        (s1,s2) <- socketPair AF_UNIX Stream 0
-        tid <- forkIO (sf s1 `finally` sendEOF s1)
+        (s1,s2) <- sockpair
+        tid <- forkOS (sf s1 `finally` sendEOF s1)
         return (s2,tid)
       where
         sf s1
@@ -164,8 +165,8 @@ sendIllegalCore range headers = bracket setup teardown $ \(s2,_) -> do
     return ()
   where
     setup = do
-        (s1,s2) <- socketPair AF_UNIX Stream 0
-        tid <- forkIO (sf s1 `finally` sendEOF s1)
+        (s1,s2) <- sockpair
+        tid <- forkOS (sf s1 `finally` sendEOF s1)
         return (s2,tid)
       where
         sf s1
@@ -211,9 +212,9 @@ truncateFileCore headers = bracket setup teardown $ \(s2,_) -> do
 #else
         runResourceT $ sourceFile inputFile $$ sinkFile tempFile
 #endif
-        (s1,s2) <- socketPair AF_UNIX Stream 0
+        (s1,s2) <- sockpair
         ref <- newIORef (1 :: Int)
-        tid <- forkIO (sf s1 ref `finally` sendEOF s1)
+        tid <- forkOS (sf s1 ref `finally` sendEOF s1)
         return (s2,tid)
       where
         sf s1 ref
@@ -249,3 +250,18 @@ sinkAppendFile :: MonadResource m
                   -> Sink ByteString m ()
 #endif
 sinkAppendFile fp = sinkIOHandle (openBinaryFile fp AppendMode)
+
+----------------------------------------------------------------
+
+sockpair :: IO (Socket, Socket)
+sockpair = withSystemTempFile "temp-for-pair" $ \file hdl -> do
+    hClose hdl
+    removeFile file
+    listenSock <- socket AF_UNIX Stream defaultProtocol
+    bind listenSock $ SockAddrUnix file
+    listen listenSock 10
+    clientSock <- socket AF_UNIX Stream defaultProtocol
+    connect clientSock $ SockAddrUnix file
+    (serverSock, _) <- accept listenSock
+    close listenSock
+    return (clientSock, serverSock)
